@@ -1,0 +1,30 @@
+# AdaptAble Backend – Python dependencies
+# FIX 8: All versions tested and compatible with Python 3.11 (Render stable)
+# Install: pip install -r requirements.txt
+
+# ── Web framework ────────────────────────────────────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# ── Supabase ─────────────────────────────────────────────────────────────────
+supabase==2.10.0
+# supabase 2.10.0 requires gotrue >= 2.9.0 and storage3 >= 0.9.0 — both bundled
+
+# ── JWT validation ───────────────────────────────────────────────────────────
+PyJWT==2.10.1
+cryptography==43.0.3          # PyJWT RSA/EC support (not used here but keeps install clean)
+
+# ── PDF extraction ───────────────────────────────────────────────────────────
+pdfplumber==0.11.4
+pdfminer.six==20231228        # pinned transitive dep of pdfplumber (avoids version drift)
+
+# ── HTTP client (async, for HF + Azure TTS) ──────────────────────────────────
+httpx==0.27.2                 # pinned; 0.28 drops Python 3.11 support in some builds
+
+# ── Configuration & validation ───────────────────────────────────────────────
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-multipart==0.0.20      # required for Form + File uploads in FastAPI
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+python-dotenv==1.0.1

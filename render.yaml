@@ -1,0 +1,47 @@
+# render.yaml – Render.com deployment spec for AdaptAble backend
+# Docs: https://render.com/docs/yaml-spec
+
+services:
+  - type: web
+    name: adaptable-backend
+    env: python
+    # FIX 8: Pin Python version to 3.11 (Render's stable version)
+    # Your dev machine used 3.13 (visible in __pycache__ filenames), but
+    # Render defaults to 3.11. Pinning avoids version mismatch failures.
+    pythonVersion: "3.11.9"
+    region: oregon
+    plan: starter              # upgrade to standard for production
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+
+    envVars:
+      # ── Supabase ──────────────────────────────────────────────────────────
+      - key: SUPABASE_URL
+        sync: false            # set manually in the Render dashboard
+
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+
+      # ── Azure TTS ─────────────────────────────────────────────────────────
+      - key: AZURE_TTS_KEY
+        sync: false
+
+      - key: AZURE_TTS_REGION
+        value: eastus
+
+      # ── Hugging Face ──────────────────────────────────────────────────────
+      - key: HF_TOKEN
+        sync: false
+
+      - key: HF_MODEL
+        value: mistralai/Mistral-7B-Instruct-v0.1
+
+      # ── CORS ──────────────────────────────────────────────────────────────
+      # FIX: Updated to include actual Render URL and localhost
+      # Replace YOUR-VERCEL-APP with your actual Vercel deployment URL
+      - key: ALLOWED_ORIGINS_STR
+        value: "https://adaptable-f4pu.onrender.com,https://YOUR-VERCEL-APP.vercel.app,http://localhost:3000"
