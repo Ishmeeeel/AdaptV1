@@ -1,30 +1,34 @@
-# AdaptAble Backend – Python dependencies
-# FIX 8: All versions tested and compatible with Python 3.11 (Render stable)
-# Install: pip install -r requirements.txt
+# AdaptAble Backend — requirements.txt
+# Tested on Python 3.11.x (Render's stable version)
+# Every version is pinned to prevent "works locally, breaks on Render" surprises
 
-# ── Web framework ────────────────────────────────────────────────────────────
+# ── Web framework ─────────────────────────────────────────────────────────────
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
 
-# ── Supabase ─────────────────────────────────────────────────────────────────
+# ── Supabase ──────────────────────────────────────────────────────────────────
 supabase==2.10.0
-# supabase 2.10.0 requires gotrue >= 2.9.0 and storage3 >= 0.9.0 — both bundled
 
-# ── JWT validation ───────────────────────────────────────────────────────────
+# ── JWT validation ────────────────────────────────────────────────────────────
 PyJWT==2.10.1
-cryptography==43.0.3          # PyJWT RSA/EC support (not used here but keeps install clean)
+cryptography==43.0.3
 
-# ── PDF extraction ───────────────────────────────────────────────────────────
+# ── Email validation (REQUIRED for Pydantic EmailStr) ─────────────────────────
+# Without this the app crashes at startup on Render with:
+# "email-validator is not installed, run pip install pydantic[email]"
+email-validator==2.2.0
+
+# ── PDF extraction ────────────────────────────────────────────────────────────
 pdfplumber==0.11.4
-pdfminer.six==20231228        # pinned transitive dep of pdfplumber (avoids version drift)
+pdfminer.six==20231228
 
-# ── HTTP client (async, for HF + Azure TTS) ──────────────────────────────────
-httpx==0.27.2                 # pinned; 0.28 drops Python 3.11 support in some builds
+# ── HTTP client (async, for HuggingFace + Azure TTS) ─────────────────────────
+httpx==0.27.2
 
-# ── Configuration & validation ───────────────────────────────────────────────
+# ── Configuration and validation ──────────────────────────────────────────────
 pydantic==2.10.4
 pydantic-settings==2.7.0
-python-multipart==0.0.20      # required for Form + File uploads in FastAPI
+python-multipart==0.0.20
 
-# ── Utilities ────────────────────────────────────────────────────────────────
+# ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv==1.0.1
