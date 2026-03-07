@@ -51,19 +51,22 @@ def _build_lesson_summary(
 
 
 def _get_teacher_name(teacher_id: str) -> str:
-    res = (
-        supabase.table("profiles")
-        .select("full_name")
-        .eq("id", teacher_id)
-        .single()
-        .execute()
-    )
-    return res.data.get("full_name", "Teacher") if res.data else "Teacher"
+    try:
+        res = (
+            supabase.table("profiles")
+            .select("full_name")
+            .eq("id", teacher_id)
+            .single()
+            .execute()
+        )
+        return res.data.get("full_name", "Teacher") if res.data else "Teacher"
+    except Exception:
+        return "Teacher"
 
 
 def _get_student_lessons(user_id: str) -> List[LessonSummary]:
     """
-    Return all lessons assigned/available to a student with their progress.
+    Return all lessons available to a student with their progress.
     """
     # Get enrollments for this student
     enroll_res = (
@@ -76,7 +79,7 @@ def _get_student_lessons(user_id: str) -> List[LessonSummary]:
         e["lesson_id"]: e for e in (enroll_res.data or [])
     }
 
-    # Get all published lessons assigned to this student's school
+    # Get student's school
     profile_res = (
         supabase.table("profiles")
         .select("school_id")
@@ -121,7 +124,6 @@ def get_student_dashboard(user_id: str) -> StudentDashboard:
         overall_progress=overall,
     )
 
-    # Subject breakdown
     subjects: Dict[str, Dict] = {}
     for l in lessons:
         s = l.subject
@@ -166,15 +168,18 @@ def get_student_lesson(user_id: str, lesson_id: str) -> LessonSummary:
     if not res.data:
         raise HTTPException(status_code=404, detail="Lesson not found.")
     row = res.data
+
+    # ✅ FIX: Use .execute() without .single() so missing enrollment
+    # returns empty list instead of throwing a 500 error
     enroll_res = (
         supabase.table("student_lessons")
         .select("*")
         .eq("student_id", user_id)
         .eq("lesson_id", lesson_id)
-        .single()
         .execute()
     )
-    enroll = enroll_res.data
+    enroll = enroll_res.data[0] if enroll_res.data else None
+
     teacher_name = _get_teacher_name(row.get("teacher_id", ""))
     return _build_lesson_summary(row, enroll, teacher_name)
 
@@ -184,8 +189,7 @@ def get_student_lesson(user_id: str, lesson_id: str) -> LessonSummary:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_lesson_page(user_id: str, lesson_id: str, page_num: int) -> PageContent:
-    """Return original + simplified content for a page, respecting profile."""
-    # Ensure lesson exists and student has access
+    """Return original + simplified content for a page."""
     lesson_res = (
         supabase.table("lessons")
         .select("id, page_count")
@@ -236,7 +240,6 @@ def get_lesson_audio(user_id: str, lesson_id: str) -> AudioResponse:
         .select("audio_url, language")
         .eq("lesson_id", lesson_id)
         .eq("language", language)
-        .single()
         .execute()
     )
     if not audio_res.data:
@@ -246,12 +249,11 @@ def get_lesson_audio(user_id: str, lesson_id: str) -> AudioResponse:
             .select("audio_url, language")
             .eq("lesson_id", lesson_id)
             .eq("language", "english")
-            .single()
             .execute()
         )
 
     if audio_res.data:
-        return AudioResponse(audio_url=audio_res.data["audio_url"], language=language)
+        return AudioResponse(audio_url=audio_res.data[0]["audio_url"], language=language)
     return AudioResponse(audio_url=None, language=language)
 
 
@@ -265,7 +267,6 @@ def update_lesson_progress(
     current_page: int,
     is_completed: bool,
 ) -> Dict[str, bool]:
-    # Fetch lesson page count
     lesson_res = (
         supabase.table("lessons")
         .select("page_count")
@@ -290,7 +291,6 @@ def update_lesson_progress(
         upsert_data, on_conflict="student_id,lesson_id"
     ).execute()
 
-    # Log activity
     if is_completed:
         title_res = (
             supabase.table("lessons")
