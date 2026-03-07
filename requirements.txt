@@ -11,6 +11,7 @@ supabase==2.10.0
 
 # ── JWT validation ────────────────────────────────────────────────────────────
 PyJWT==2.10.1
+PyJWT[crypto]>=2.8.0
 cryptography==43.0.3
 
 # ── Email validation (REQUIRED for Pydantic EmailStr) ─────────────────────────

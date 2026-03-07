@@ -1,20 +1,9 @@
-"""
-dependencies.py – Reusable FastAPI dependencies.
-
-`get_current_user` validates the Supabase-issued JWT and returns the
-caller's user_id (UUID string).
-
-FIX 12 (partial): Added `require_role` factory so routes can enforce
-role-based access at the dependency level, not just the backend service.
-Usage:
-    user_id: str = Depends(require_role("teacher"))
-    user_id: str = Depends(require_role("admin"))
-"""
-
 import logging
 from typing import Callable
+from functools import lru_cache
 
 import jwt
+from jwt import PyJWKClient
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -24,20 +13,20 @@ logger = logging.getLogger(__name__)
 
 bearer_scheme = HTTPBearer(auto_error=True)
 
+# ✅ FIX: Use Supabase JWKS endpoint to verify ES256 tokens
+@lru_cache
+def get_jwks_client() -> PyJWKClient:
+    return PyJWKClient(f"{settings.SUPABASE_URL}/auth/v1/.well-known/jwks.json")
 
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-) -> str:
-    """
-    Validate a Supabase JWT and return the subject (user UUID).
-    Raises 401 if the token is missing, expired, or tampered with.
-    """
-    token = credentials.credentials
+
+def verify_token(token: str) -> str:
     try:
+        jwks_client = get_jwks_client()
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
         payload = jwt.decode(
             token,
-            settings.SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
+            signing_key.key,
+            algorithms=["ES256"],
             audience="authenticated",
             options={"verify_exp": True},
         )
@@ -62,47 +51,20 @@ async def get_current_user(
         )
 
 
-def require_role(role: str) -> Callable:
-    """
-    FIX 12: Factory that returns a dependency enforcing a specific role.
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> str:
+    return verify_token(credentials.credentials)
 
-    Example:
-        @router.get("/dashboard")
-        def dashboard(user_id: str = Depends(require_role("teacher"))):
-            ...
-    """
+
+def require_role(role: str) -> Callable:
     async def _check_role(
         credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     ) -> str:
-        from database import supabase  # local import to avoid circular
+        from database import supabase
 
-        # First validate the JWT
-        token = credentials.credentials
-        try:
-            payload = jwt.decode(
-                token,
-                settings.SUPABASE_JWT_SECRET,
-                algorithms=["HS256"],
-                audience="authenticated",
-                options={"verify_exp": True},
-            )
-            user_id: str | None = payload.get("sub")
-            if not user_id:
-                raise ValueError("No sub claim")
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token has expired.",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        except (jwt.InvalidTokenError, ValueError):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid authentication token.",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+        user_id = verify_token(credentials.credentials)
 
-        # Then check the role in the database
         res = (
             supabase.table("profiles")
             .select("role")
