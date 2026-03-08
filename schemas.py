@@ -1,14 +1,10 @@
 """
 schemas.py – Pydantic models for all request bodies and API responses.
-These mirror the TypeScript interfaces in the Next.js frontend (lib/api.ts).
 """
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Dict, List, Optional
-from uuid import UUID
-
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -44,9 +40,8 @@ class UserResponse(BaseModel):
     email: str
     role: str
     school_id: Optional[str] = None
-    # Both field names returned so frontend mapping never breaks
     disability_profile: Optional[str] = None
-    profile: Optional[str] = None          # alias for disability_profile
+    profile: Optional[str] = None
     language: Optional[str] = None
     font_size: str = "medium"
     voice_speed: str = "normal"
@@ -62,7 +57,7 @@ class DashboardStats(BaseModel):
     total_lessons: int
     completed: int
     in_progress: int
-    overall_progress: int  # 0-100
+    overall_progress: int
 
 
 class LessonSummary(BaseModel):
@@ -149,7 +144,7 @@ class ProcessingSteps(BaseModel):
 
 class ProcessingStatus(BaseModel):
     lesson_id: str
-    status: str  # pending | running | done | failed
+    status: str
     steps: ProcessingSteps
     error_message: Optional[str] = None
 
@@ -171,6 +166,7 @@ class StudentSummary(BaseModel):
     progress: int
     last_active: str
     status: str
+    class_tag: Optional[str] = None  # ✅ NEW — e.g. "100L", "JSS2", "Cohort A"
 
 
 class CreateStudentRequest(BaseModel):
@@ -178,6 +174,7 @@ class CreateStudentRequest(BaseModel):
     email: EmailStr
     disability_profile: str
     language: str
+    class_tag: Optional[str] = None  # ✅ NEW
 
 
 class CreateStudentResponse(BaseModel):
@@ -198,6 +195,7 @@ class StudentDetail(BaseModel):
     font_size: str
     voice_speed: str
     high_contrast: bool
+    class_tag: Optional[str] = None  # ✅ NEW
 
 
 class SaveNoteRequest(BaseModel):
@@ -225,8 +223,6 @@ class SchoolSummary(BaseModel):
     is_active: bool
 
 
-# FIX 4: Added CreateSchoolRequest Pydantic model so the endpoint can receive
-# a JSON body instead of query params (which is what the frontend sends)
 class CreateSchoolRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=200)
     location: str = Field(..., min_length=2, max_length=200)

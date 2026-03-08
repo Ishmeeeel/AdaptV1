@@ -1,10 +1,5 @@
 """
 services/teacher_service.py – Business logic for teacher-facing endpoints.
-
-FIX 6:  total_students was always ≤ 5 because the query had .limit(5).
-        Now uses a separate count query for the total.
-FIX 13: active_students now counts from the full student list, not just
-        the 5 most recent.
 """
 
 from __future__ import annotations
@@ -36,15 +31,15 @@ logger = logging.getLogger(__name__)
 
 EMOJI_MAP: Dict[str, str] = {
     "mathematics": "🔢",
-    "english": "📚",
-    "science": "🔬",
+    "english":     "📚",
+    "science":     "🔬",
     "social studies": "🌍",
     "civic education": "🏛️",
-    "yoruba": "🗣️",
-    "hausa": "🗣️",
-    "igbo": "🗣️",
+    "yoruba":      "🗣️",
+    "hausa":       "🗣️",
+    "igbo":        "🗣️",
     "agriculture": "🌱",
-    "computer": "💻",
+    "computer":    "💻",
 }
 
 
@@ -122,6 +117,7 @@ def _row_to_student_summary(row: Dict[str, Any]) -> StudentSummary:
         progress=progress,
         last_active=last_active,
         status="active" if last_active else "inactive",
+        class_tag=row.get("class_tag"),  # ✅ NEW
     )
 
 
@@ -132,7 +128,6 @@ def _row_to_student_summary(row: Dict[str, Any]) -> StudentSummary:
 def get_teacher_dashboard(teacher_id: str) -> TeacherDashboard:
     school_id = _get_school_id(teacher_id)
 
-    # Lessons by this teacher
     lessons_res = (
         supabase.table("lessons")
         .select("*")
@@ -143,7 +138,6 @@ def get_teacher_dashboard(teacher_id: str) -> TeacherDashboard:
     total_lessons = len(lessons_data)
     published = sum(1 for l in lessons_data if l.get("is_published"))
 
-    # FIX 6: Get TOTAL student count separately from the recent-5 query
     total_count_res = (
         supabase.table("profiles")
         .select("id", count="exact")
@@ -153,7 +147,6 @@ def get_teacher_dashboard(teacher_id: str) -> TeacherDashboard:
     )
     total_students = total_count_res.count or 0
 
-    # Get recent 5 students (for the dashboard widget)
     recent_res = (
         supabase.table("profiles")
         .select("*")
@@ -165,8 +158,6 @@ def get_teacher_dashboard(teacher_id: str) -> TeacherDashboard:
     )
     recent_students = [_row_to_student_summary(s) for s in (recent_res.data or [])]
 
-    # FIX 13: active_students from ALL students (not just recent 5)
-    # We consider a student active if they have any lesson access in the DB
     active_count_res = (
         supabase.table("student_lessons")
         .select("student_id", count="exact")
@@ -175,7 +166,6 @@ def get_teacher_dashboard(teacher_id: str) -> TeacherDashboard:
     )
     active_students = active_count_res.count or 0
 
-    # Profile breakdown
     all_students_res = (
         supabase.table("profiles")
         .select("disability_profile")
@@ -189,7 +179,6 @@ def get_teacher_dashboard(teacher_id: str) -> TeacherDashboard:
         profile_counter[p] = profile_counter.get(p, 0) + 1
     profile_breakdown = [{"profile": k, "count": v} for k, v in profile_counter.items()]
 
-    # Top lessons (by student count)
     top_lessons = sorted(
         [_row_to_teacher_lesson(l) for l in lessons_data],
         key=lambda x: x.student_count,
@@ -197,10 +186,10 @@ def get_teacher_dashboard(teacher_id: str) -> TeacherDashboard:
     )[:5]
 
     stats = {
-        "total_lessons": total_lessons,
+        "total_lessons":     total_lessons,
         "published_lessons": published,
-        "total_students": total_students,       # FIX 6: now accurate
-        "active_students": active_students,     # FIX 13: now accurate
+        "total_students":    total_students,
+        "active_students":   active_students,
     }
 
     return TeacherDashboard(
@@ -232,14 +221,11 @@ async def upload_lesson(
     subject: str,
     file: UploadFile,
     background_tasks: BackgroundTasks,
+    assigned_student_ids: List[str] = [],
 ) -> UploadResponse:
-    """
-    Accept a PDF lesson file, store metadata in DB, upload to Supabase Storage,
-    then enqueue the async processing pipeline.
-    """
-    school_id = _get_school_id(teacher_id)
-    lesson_id = str(uuid.uuid4())
-    icon_emoji = EMOJI_MAP.get(subject.lower(), "📖")
+    school_id  = _get_school_id(teacher_id)
+    lesson_id  = str(uuid.uuid4())
+    icon_emoji = EMOJI_MAP.get((subject or "").lower(), "📖")
 
     file_bytes = await file.read()
     if not file_bytes:
@@ -257,43 +243,61 @@ async def upload_lesson(
         raise HTTPException(status_code=500, detail="Failed to store lesson file.")
 
     lesson_row = {
-        "id": lesson_id,
-        "teacher_id": teacher_id,
-        "school_id": school_id,
-        "title": title,
-        "subject": subject,
-        "icon_emoji": icon_emoji,
-        "page_count": 0,
-        "is_published": False,
+        "id":                lesson_id,
+        "teacher_id":        teacher_id,
+        "school_id":         school_id,
+        "title":             title,
+        "subject":           subject,
+        "icon_emoji":        icon_emoji,
+        "page_count":        0,
+        "is_published":      False,
         "processing_status": "pending",
-        "storage_path": storage_path,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "storage_path":      storage_path,
+        "created_at":        datetime.now(timezone.utc).isoformat(),
     }
     supabase.table("lessons").insert(lesson_row).execute()
 
-    supabase.table("processing_jobs").insert(
-        {
-            "id": str(uuid.uuid4()),
-            "lesson_id": lesson_id,
-            "status": "pending",
-            "steps": {
-                "extract_text": False,
-                "audio_english": False,
-                "audio_hausa": False,
-                "audio_yoruba": False,
-                "audio_igbo": False,
-                "simplify_dyslexia": False,
-                "image_descriptions": False,
-            },
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-    ).execute()
+    supabase.table("processing_jobs").insert({
+        "id":        str(uuid.uuid4()),
+        "lesson_id": lesson_id,
+        "status":    "pending",
+        "steps": {
+            "extract_text":       False,
+            "audio_english":      False,
+            "audio_hausa":        False,
+            "audio_yoruba":       False,
+            "audio_igbo":         False,
+            "simplify_dyslexia":  False,
+            "image_descriptions": False,
+        },
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+
+    if assigned_student_ids:
+        assignment_rows = [
+            {
+                "student_id":       sid,
+                "lesson_id":        lesson_id,
+                "current_page":     1,
+                "progress_percent": 0,
+                "is_completed":     False,
+                "enrolled_at":      datetime.now(timezone.utc).isoformat(),
+            }
+            for sid in assigned_student_ids
+        ]
+        supabase.table("student_lessons").upsert(
+            assignment_rows, on_conflict="student_id,lesson_id"
+        ).execute()
+
+        supabase.table("lessons").update(
+            {"is_published": True}
+        ).eq("id", lesson_id).execute()
 
     background_tasks.add_task(enqueue_lesson_processing, lesson_id, storage_path)
 
     return UploadResponse(
         lesson_id=lesson_id,
-        message="Lesson uploaded successfully. Processing has started.",
+        message="Lesson uploaded and assigned successfully. Processing has started.",
     )
 
 
@@ -334,21 +338,19 @@ def assign_lesson(
 
     rows = [
         {
-            "student_id": sid,
-            "lesson_id": lesson_id,
-            "current_page": 1,
+            "student_id":       sid,
+            "lesson_id":        lesson_id,
+            "current_page":     1,
             "progress_percent": 0,
-            "is_completed": False,
-            "enrolled_at": datetime.now(timezone.utc).isoformat(),
+            "is_completed":     False,
+            "enrolled_at":      datetime.now(timezone.utc).isoformat(),
         }
         for sid in student_ids
     ]
     supabase.table("student_lessons").upsert(
         rows, on_conflict="student_id,lesson_id"
     ).execute()
-
     supabase.table("lessons").update({"is_published": True}).eq("id", lesson_id).execute()
-
     return {"ok": True, "assigned": len(rows)}
 
 
@@ -389,42 +391,39 @@ def get_teacher_students(teacher_id: str) -> List[StudentSummary]:
 
 
 def create_student(teacher_id: str, body: CreateStudentRequest) -> CreateStudentResponse:
-    """Create a student account under the teacher's school."""
-    school_id = _get_school_id(teacher_id)
+    school_id     = _get_school_id(teacher_id)
     temp_password = secrets.token_urlsafe(10)
 
     try:
-        auth_res = supabase.auth.admin.create_user(
-            {
-                "email": body.email,
-                "password": temp_password,
-                "email_confirm": True,
-                "user_metadata": {"full_name": body.name},
-            }
-        )
+        auth_res = supabase.auth.admin.create_user({
+            "email":         body.email,
+            "password":      temp_password,
+            "email_confirm": True,
+            "user_metadata": {"full_name": body.name},
+        })
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     student_id: str = auth_res.user.id  # type: ignore[union-attr]
 
     profile_row = {
-        "id": student_id,
-        "full_name": body.name,
-        "email": body.email,
-        "role": "student",
-        "school_id": school_id,
+        "id":                 student_id,
+        "full_name":          body.name,
+        "email":              body.email,
+        "role":               "student",
+        "school_id":          school_id,
         "disability_profile": body.disability_profile,
-        "language": body.language,
-        "font_size": "medium",
-        "voice_speed": "normal",
-        "high_contrast": False,
+        "language":           body.language,
+        "class_tag":          body.class_tag,   # ✅ NEW
+        "font_size":          "medium",
+        "voice_speed":        "normal",
+        "high_contrast":      False,
         "onboarding_complete": True,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at":         datetime.now(timezone.utc).isoformat(),
     }
     try:
         supabase.table("profiles").insert(profile_row).execute()
-    except Exception as exc:
-        # Rollback auth user
+    except Exception:
         try:
             supabase.auth.admin.delete_user(student_id)
         except Exception:
@@ -439,12 +438,12 @@ def create_student(teacher_id: str, body: CreateStudentRequest) -> CreateStudent
         progress=0,
         last_active="",
         status="inactive",
+        class_tag=body.class_tag,  # ✅ NEW
     )
     return CreateStudentResponse(student=summary, temp_password=temp_password)
 
 
 def get_student_detail(teacher_id: str, student_id: str) -> StudentDetail:
-    """Get a detailed view of a student, including per-lesson progress."""
     teacher_school = _get_school_id(teacher_id)
 
     profile_res = (
@@ -470,19 +469,17 @@ def get_student_detail(teacher_id: str, student_id: str) -> StudentDetail:
     total_progress = 0
     for p in progress_res.data or []:
         lrow = p.get("lessons") or {}
-        lesson_progress.append(
-            LessonSummary(
-                id=lrow.get("id", ""),
-                title=lrow.get("title", ""),
-                subject=lrow.get("subject", ""),
-                page_count=lrow.get("page_count", 1),
-                icon_emoji=lrow.get("icon_emoji", "📖"),
-                teacher_name="",
-                progress_percent=p.get("progress_percent", 0),
-                current_page=p.get("current_page", 1),
-                is_completed=p.get("is_completed", False),
-            )
-        )
+        lesson_progress.append(LessonSummary(
+            id=lrow.get("id", ""),
+            title=lrow.get("title", ""),
+            subject=lrow.get("subject", ""),
+            page_count=lrow.get("page_count", 1),
+            icon_emoji=lrow.get("icon_emoji", "📖"),
+            teacher_name="",
+            progress_percent=p.get("progress_percent", 0),
+            current_page=p.get("current_page", 1),
+            is_completed=p.get("is_completed", False),
+        ))
         total_progress += p.get("progress_percent", 0)
 
     n = len(lesson_progress)
@@ -513,6 +510,7 @@ def get_student_detail(teacher_id: str, student_id: str) -> StudentDetail:
         font_size=row.get("font_size", "medium"),
         voice_speed=row.get("voice_speed", "normal"),
         high_contrast=row.get("high_contrast", False),
+        class_tag=row.get("class_tag"),  # ✅ NEW
     )
 
 
@@ -521,7 +519,7 @@ def save_teacher_note(teacher_id: str, student_id: str, note_text: str) -> Dict[
         {
             "teacher_id": teacher_id,
             "student_id": student_id,
-            "note_text": note_text,
+            "note_text":  note_text,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
         on_conflict="teacher_id,student_id",
