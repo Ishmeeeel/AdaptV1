@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from config import settings
-from routers import auth, student, teacher, admin
+from routers import auth, student, teacher, admin, translate
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -60,7 +60,7 @@ app.include_router(auth.router,    prefix="/api/auth",    tags=["Auth"])
 app.include_router(student.router, prefix="/api/student", tags=["Student"])
 app.include_router(teacher.router, prefix="/api/teacher", tags=["Teacher"])
 app.include_router(admin.router,   prefix="/api/admin",   tags=["Admin"])
-
+app.include_router(translate.router, prefix="/api/translate", tags=["Translation"])
 
 # ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["Health"])
