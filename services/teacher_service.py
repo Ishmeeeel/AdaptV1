@@ -8,7 +8,7 @@ import logging
 import secrets
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 
@@ -30,16 +30,16 @@ from services.processing_service import enqueue_lesson_processing
 logger = logging.getLogger(__name__)
 
 EMOJI_MAP: Dict[str, str] = {
-    "mathematics": "🔢",
-    "english":     "📚",
-    "science":     "🔬",
-    "social studies": "🌍",
+    "mathematics":     "🔢",
+    "english":         "📚",
+    "science":         "🔬",
+    "social studies":  "🌍",
     "civic education": "🏛️",
-    "yoruba":      "🗣️",
-    "hausa":       "🗣️",
-    "igbo":        "🗣️",
-    "agriculture": "🌱",
-    "computer":    "💻",
+    "yoruba":          "🗣️",
+    "hausa":           "🗣️",
+    "igbo":            "🗣️",
+    "agriculture":     "🌱",
+    "computer":        "💻",
 }
 
 
@@ -65,7 +65,6 @@ def _row_to_teacher_lesson(row: Dict[str, Any]) -> TeacherLesson:
         .eq("lesson_id", row["id"])
         .execute()
     )
-    student_count = count_res.count or 0
     return TeacherLesson(
         id=row["id"],
         title=row.get("title", ""),
@@ -74,7 +73,7 @@ def _row_to_teacher_lesson(row: Dict[str, Any]) -> TeacherLesson:
         icon_emoji=row.get("icon_emoji", "📖"),
         is_published=row.get("is_published", False),
         processing_status=row.get("processing_status", "pending"),
-        student_count=student_count,
+        student_count=count_res.count or 0,
         created_at=row.get("created_at", ""),
     )
 
@@ -107,7 +106,7 @@ def _row_to_student_summary(row: Dict[str, Any]) -> StudentSummary:
     )
     last_active = ""
     if last_active_res.data:
-        last_active = last_active_res.data[0].get("last_accessed_at", "")
+        last_active = last_active_res.data[0].get("last_accessed_at", "") or ""
 
     return StudentSummary(
         id=row["id"],
@@ -117,7 +116,7 @@ def _row_to_student_summary(row: Dict[str, Any]) -> StudentSummary:
         progress=progress,
         last_active=last_active,
         status="active" if last_active else "inactive",
-        class_tag=row.get("class_tag"),  # ✅ NEW
+        class_tag=row.get("class_tag"),
     )
 
 
@@ -185,15 +184,13 @@ def get_teacher_dashboard(teacher_id: str) -> TeacherDashboard:
         reverse=True,
     )[:5]
 
-    stats = {
-        "total_lessons":     total_lessons,
-        "published_lessons": published,
-        "total_students":    total_students,
-        "active_students":   active_students,
-    }
-
     return TeacherDashboard(
-        stats=stats,
+        stats={
+            "total_lessons":     total_lessons,
+            "published_lessons": published,
+            "total_students":    total_students,
+            "active_students":   active_students,
+        },
         recent_students=recent_students,
         profile_breakdown=profile_breakdown,
         top_lessons=top_lessons,
@@ -242,7 +239,7 @@ async def upload_lesson(
         logger.error("Storage upload failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to store lesson file.")
 
-    lesson_row = {
+    supabase.table("lessons").insert({
         "id":                lesson_id,
         "teacher_id":        teacher_id,
         "school_id":         school_id,
@@ -254,8 +251,7 @@ async def upload_lesson(
         "processing_status": "pending",
         "storage_path":      storage_path,
         "created_at":        datetime.now(timezone.utc).isoformat(),
-    }
-    supabase.table("lessons").insert(lesson_row).execute()
+    }).execute()
 
     supabase.table("processing_jobs").insert({
         "id":        str(uuid.uuid4()),
@@ -274,21 +270,20 @@ async def upload_lesson(
     }).execute()
 
     if assigned_student_ids:
-        assignment_rows = [
-            {
-                "student_id":       sid,
-                "lesson_id":        lesson_id,
-                "current_page":     1,
-                "progress_percent": 0,
-                "is_completed":     False,
-                "enrolled_at":      datetime.now(timezone.utc).isoformat(),
-            }
-            for sid in assigned_student_ids
-        ]
         supabase.table("student_lessons").upsert(
-            assignment_rows, on_conflict="student_id,lesson_id"
+            [
+                {
+                    "student_id":       sid,
+                    "lesson_id":        lesson_id,
+                    "current_page":     1,
+                    "progress_percent": 0,
+                    "is_completed":     False,
+                    "enrolled_at":      datetime.now(timezone.utc).isoformat(),
+                }
+                for sid in assigned_student_ids
+            ],
+            on_conflict="student_id,lesson_id",
         ).execute()
-
         supabase.table("lessons").update(
             {"is_published": True}
         ).eq("id", lesson_id).execute()
@@ -321,11 +316,7 @@ def delete_lesson(teacher_id: str, lesson_id: str) -> None:
     supabase.table("lessons").delete().eq("id", lesson_id).execute()
 
 
-def assign_lesson(
-    teacher_id: str,
-    lesson_id: str,
-    student_ids: List[str],
-) -> Dict[str, Any]:
+def assign_lesson(teacher_id: str, lesson_id: str, student_ids: List[str]) -> Dict[str, Any]:
     res = (
         supabase.table("lessons")
         .select("id, teacher_id")
@@ -336,22 +327,22 @@ def assign_lesson(
     if not res.data or res.data["teacher_id"] != teacher_id:
         raise HTTPException(status_code=403, detail="Not authorised to assign this lesson.")
 
-    rows = [
-        {
-            "student_id":       sid,
-            "lesson_id":        lesson_id,
-            "current_page":     1,
-            "progress_percent": 0,
-            "is_completed":     False,
-            "enrolled_at":      datetime.now(timezone.utc).isoformat(),
-        }
-        for sid in student_ids
-    ]
     supabase.table("student_lessons").upsert(
-        rows, on_conflict="student_id,lesson_id"
+        [
+            {
+                "student_id":       sid,
+                "lesson_id":        lesson_id,
+                "current_page":     1,
+                "progress_percent": 0,
+                "is_completed":     False,
+                "enrolled_at":      datetime.now(timezone.utc).isoformat(),
+            }
+            for sid in student_ids
+        ],
+        on_conflict="student_id,lesson_id",
     ).execute()
     supabase.table("lessons").update({"is_published": True}).eq("id", lesson_id).execute()
-    return {"ok": True, "assigned": len(rows)}
+    return {"ok": True, "assigned": len(student_ids)}
 
 
 def get_processing_status(teacher_id: str, lesson_id: str) -> ProcessingStatus:
@@ -365,11 +356,10 @@ def get_processing_status(teacher_id: str, lesson_id: str) -> ProcessingStatus:
     if not res.data:
         raise HTTPException(status_code=404, detail="Processing job not found.")
     row = res.data
-    steps_raw = row.get("steps") or {}
     return ProcessingStatus(
         lesson_id=lesson_id,
         status=row.get("status", "pending"),
-        steps=ProcessingSteps(**steps_raw),
+        steps=ProcessingSteps(**(row.get("steps") or {})),
         error_message=row.get("error_message"),
     )
 
@@ -406,23 +396,22 @@ def create_student(teacher_id: str, body: CreateStudentRequest) -> CreateStudent
 
     student_id: str = auth_res.user.id  # type: ignore[union-attr]
 
-    profile_row = {
-        "id":                 student_id,
-        "full_name":          body.name,
-        "email":              body.email,
-        "role":               "student",
-        "school_id":          school_id,
-        "disability_profile": body.disability_profile,
-        "language":           body.language,
-        "class_tag":          body.class_tag,   # ✅ NEW
-        "font_size":          "medium",
-        "voice_speed":        "normal",
-        "high_contrast":      False,
-        "onboarding_complete": True,
-        "created_at":         datetime.now(timezone.utc).isoformat(),
-    }
     try:
-        supabase.table("profiles").insert(profile_row).execute()
+        supabase.table("profiles").insert({
+            "id":                 student_id,
+            "full_name":          body.name,
+            "email":              body.email,
+            "role":               "student",
+            "school_id":          school_id,
+            "disability_profile": body.disability_profile,
+            "language":           body.language,
+            "class_tag":          body.class_tag,
+            "font_size":          "medium",
+            "voice_speed":        "normal",
+            "high_contrast":      False,
+            "onboarding_complete": True,
+            "created_at":         datetime.now(timezone.utc).isoformat(),
+        }).execute()
     except Exception:
         try:
             supabase.auth.admin.delete_user(student_id)
@@ -430,17 +419,19 @@ def create_student(teacher_id: str, body: CreateStudentRequest) -> CreateStudent
             pass
         raise HTTPException(status_code=500, detail="Failed to create student profile.")
 
-    summary = StudentSummary(
-        id=student_id,
-        name=body.name,
-        profile=body.disability_profile,
-        lessons=0,
-        progress=0,
-        last_active="",
-        status="inactive",
-        class_tag=body.class_tag,  # ✅ NEW
+    return CreateStudentResponse(
+        student=StudentSummary(
+            id=student_id,
+            name=body.name,
+            profile=body.disability_profile,
+            lessons=0,
+            progress=0,
+            last_active="",
+            status="inactive",
+            class_tag=body.class_tag,
+        ),
+        temp_password=temp_password,
     )
-    return CreateStudentResponse(student=summary, temp_password=temp_password)
 
 
 def get_student_detail(teacher_id: str, student_id: str) -> StudentDetail:
@@ -459,6 +450,7 @@ def get_student_detail(teacher_id: str, student_id: str) -> StudentDetail:
     if row.get("school_id") != teacher_school:
         raise HTTPException(status_code=403, detail="Student not in your school.")
 
+    # Fetch lesson progress WITH grade and feedback
     progress_res = (
         supabase.table("student_lessons")
         .select("*, lessons(*)")
@@ -479,6 +471,8 @@ def get_student_detail(teacher_id: str, student_id: str) -> StudentDetail:
             progress_percent=p.get("progress_percent", 0),
             current_page=p.get("current_page", 1),
             is_completed=p.get("is_completed", False),
+            teacher_grade=p.get("teacher_grade"),       # ✅ NEW
+            teacher_feedback=p.get("teacher_feedback"), # ✅ NEW
         ))
         total_progress += p.get("progress_percent", 0)
 
@@ -495,7 +489,17 @@ def get_student_detail(teacher_id: str, student_id: str) -> StudentDetail:
     )
     last_active = ""
     if last_active_res.data:
-        last_active = last_active_res.data[0].get("last_accessed_at", "")
+        last_active = last_active_res.data[0].get("last_accessed_at", "") or ""
+
+    # ✅ Fetch existing teacher note to pre-fill the textarea
+    note_res = (
+        supabase.table("teacher_notes")
+        .select("note_text")
+        .eq("teacher_id", teacher_id)
+        .eq("student_id", student_id)
+        .execute()
+    )
+    teacher_note = note_res.data[0]["note_text"] if note_res.data else None
 
     return StudentDetail(
         id=student_id,
@@ -510,7 +514,8 @@ def get_student_detail(teacher_id: str, student_id: str) -> StudentDetail:
         font_size=row.get("font_size", "medium"),
         voice_speed=row.get("voice_speed", "normal"),
         high_contrast=row.get("high_contrast", False),
-        class_tag=row.get("class_tag"),  # ✅ NEW
+        class_tag=row.get("class_tag"),
+        teacher_note=teacher_note,  # ✅ NEW
     )
 
 
@@ -524,4 +529,42 @@ def save_teacher_note(teacher_id: str, student_id: str, note_text: str) -> Dict[
         },
         on_conflict="teacher_id,student_id",
     ).execute()
+    return {"ok": True}
+
+
+# ✅ NEW — Save grade + feedback for a student's specific lesson
+def save_lesson_grade(
+    teacher_id: str,
+    student_id: str,
+    lesson_id: str,
+    grade: Optional[str],
+    feedback: Optional[str],
+) -> Dict[str, bool]:
+    # Verify the lesson belongs to this teacher
+    lesson_res = (
+        supabase.table("lessons")
+        .select("teacher_id")
+        .eq("id", lesson_id)
+        .single()
+        .execute()
+    )
+    if not lesson_res.data or lesson_res.data["teacher_id"] != teacher_id:
+        raise HTTPException(status_code=403, detail="Not authorised to grade this lesson.")
+
+    # Verify the student_lessons row exists
+    sl_res = (
+        supabase.table("student_lessons")
+        .select("student_id")
+        .eq("student_id", student_id)
+        .eq("lesson_id", lesson_id)
+        .execute()
+    )
+    if not sl_res.data:
+        raise HTTPException(status_code=404, detail="Student not assigned to this lesson.")
+
+    supabase.table("student_lessons").update({
+        "teacher_grade":    grade,
+        "teacher_feedback": feedback,
+    }).eq("student_id", student_id).eq("lesson_id", lesson_id).execute()
+
     return {"ok": True}

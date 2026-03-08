@@ -12,6 +12,7 @@ from schemas import (
     AssignLessonRequest,
     CreateStudentRequest,
     CreateStudentResponse,
+    GradeLessonRequest,
     ProcessingStatus,
     SaveNoteRequest,
     StudentDetail,
@@ -31,7 +32,6 @@ router = APIRouter()
 
 @router.get("/dashboard", response_model=TeacherDashboard)
 def dashboard(user_id: str = Depends(get_current_user)):
-    """Return aggregated stats, recent students, and top lessons for the teacher."""
     return teacher_service.get_teacher_dashboard(user_id)
 
 
@@ -41,7 +41,6 @@ def dashboard(user_id: str = Depends(get_current_user)):
 
 @router.get("/lessons", response_model=List[TeacherLesson])
 def lessons(user_id: str = Depends(get_current_user)):
-    """List all lessons created by the teacher."""
     return teacher_service.get_teacher_lessons(user_id)
 
 
@@ -51,19 +50,21 @@ async def upload_lesson(
     title: str = Form(...),
     subject: str = Form(...),
     file: UploadFile = File(...),
+    assigned_student_ids: str = Form("[]"),
     user_id: str = Depends(get_current_user),
 ):
-    """
-    Upload a PDF lesson file.
-    Stores the file in Supabase Storage and kicks off the async processing pipeline
-    (text extraction → simplification → TTS in 4 languages).
-    """
-    return await teacher_service.upload_lesson(user_id, title, subject, file, background_tasks)
+    import json
+    try:
+        student_ids = json.loads(assigned_student_ids)
+    except Exception:
+        student_ids = []
+    return await teacher_service.upload_lesson(
+        user_id, title, subject, file, background_tasks, student_ids
+    )
 
 
 @router.delete("/lessons/{lesson_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_lesson(lesson_id: str, user_id: str = Depends(get_current_user)):
-    """Delete a lesson and all its associated pages, audio, and processing jobs."""
     teacher_service.delete_lesson(user_id, lesson_id)
 
 
@@ -73,7 +74,6 @@ def assign_lesson(
     body: AssignLessonRequest,
     user_id: str = Depends(get_current_user),
 ):
-    """Assign a lesson to one or more students."""
     return teacher_service.assign_lesson(user_id, lesson_id, body.student_ids)
 
 
@@ -83,7 +83,6 @@ def assign_lesson(
 
 @router.get("/processing/{lesson_id}", response_model=ProcessingStatus)
 def processing_status(lesson_id: str, user_id: str = Depends(get_current_user)):
-    """Poll the processing status and step completion flags for a lesson."""
     return teacher_service.get_processing_status(user_id, lesson_id)
 
 
@@ -93,19 +92,16 @@ def processing_status(lesson_id: str, user_id: str = Depends(get_current_user)):
 
 @router.get("/students", response_model=List[StudentSummary])
 def students(user_id: str = Depends(get_current_user)):
-    """List all students enrolled in the teacher's school."""
     return teacher_service.get_teacher_students(user_id)
 
 
 @router.post("/students", response_model=CreateStudentResponse, status_code=status.HTTP_201_CREATED)
 def create_student(body: CreateStudentRequest, user_id: str = Depends(get_current_user)):
-    """Create a student account under the teacher's school (with a temporary password)."""
     return teacher_service.create_student(user_id, body)
 
 
 @router.get("/students/{student_id}", response_model=StudentDetail)
 def student_detail(student_id: str, user_id: str = Depends(get_current_user)):
-    """Get a detailed profile view of a specific student including per-lesson progress."""
     return teacher_service.get_student_detail(user_id, student_id)
 
 
@@ -115,5 +111,18 @@ def save_note(
     body: SaveNoteRequest,
     user_id: str = Depends(get_current_user),
 ):
-    """Save or update a teacher's note for a student."""
     return teacher_service.save_teacher_note(user_id, student_id, body.note_text)
+
+
+# ✅ NEW — Grade a specific lesson for a student
+@router.put("/students/{student_id}/lessons/{lesson_id}/grade")
+def grade_lesson(
+    student_id: str,
+    lesson_id: str,
+    body: GradeLessonRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """Save or update a teacher's grade and feedback for a student's lesson."""
+    return teacher_service.save_lesson_grade(
+        user_id, student_id, lesson_id, body.grade, body.feedback
+    )

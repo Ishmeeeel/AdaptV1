@@ -70,6 +70,8 @@ class LessonSummary(BaseModel):
     progress_percent: int
     current_page: int
     is_completed: bool
+    teacher_grade: Optional[str] = None       # ✅ NEW
+    teacher_feedback: Optional[str] = None    # ✅ NEW
 
 
 class SubjectBreakdown(BaseModel):
@@ -166,7 +168,7 @@ class StudentSummary(BaseModel):
     progress: int
     last_active: str
     status: str
-    class_tag: Optional[str] = None  # ✅ NEW — e.g. "100L", "JSS2", "Cohort A"
+    class_tag: Optional[str] = None
 
 
 class CreateStudentRequest(BaseModel):
@@ -174,7 +176,7 @@ class CreateStudentRequest(BaseModel):
     email: EmailStr
     disability_profile: str
     language: str
-    class_tag: Optional[str] = None  # ✅ NEW
+    class_tag: Optional[str] = None
 
 
 class CreateStudentResponse(BaseModel):
@@ -195,7 +197,13 @@ class StudentDetail(BaseModel):
     font_size: str
     voice_speed: str
     high_contrast: bool
-    class_tag: Optional[str] = None  # ✅ NEW
+    class_tag: Optional[str] = None
+    teacher_note: Optional[str] = None        # ✅ NEW — pre-fills note textarea
+
+
+class GradeLessonRequest(BaseModel):          # ✅ NEW
+    grade: Optional[str] = None               # A / B / C / D / F or null to clear
+    feedback: Optional[str] = Field(None, max_length=2000)
 
 
 class SaveNoteRequest(BaseModel):
