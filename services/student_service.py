@@ -34,9 +34,9 @@ def _build_lesson_summary(
     enroll: Optional[Dict[str, Any]],
     teacher_name: str,
 ) -> LessonSummary:
-    progress = enroll.get("progress_percent", 0) if enroll else 0
-    current = enroll.get("current_page", 1) if enroll else 1
-    completed = enroll.get("is_completed", False) if enroll else False
+    progress  = enroll.get("progress_percent", 0)  if enroll else 0
+    current   = enroll.get("current_page",     1)  if enroll else 1
+    completed = enroll.get("is_completed",  False)  if enroll else False
     return LessonSummary(
         id=row["id"],
         title=row.get("title", ""),
@@ -66,9 +66,9 @@ def _get_teacher_name(teacher_id: str) -> str:
 
 def _get_student_lessons(user_id: str) -> List[LessonSummary]:
     """
-    Return all lessons available to a student with their progress.
+    ✅ UPDATED: Only return lessons explicitly assigned to this student.
+    A student_lessons row must exist — no more school-wide all-access.
     """
-    # Get enrollments for this student
     enroll_res = (
         supabase.table("student_lessons")
         .select("*")
@@ -79,25 +79,19 @@ def _get_student_lessons(user_id: str) -> List[LessonSummary]:
         e["lesson_id"]: e for e in (enroll_res.data or [])
     }
 
-    # Get student's school
-    profile_res = (
-        supabase.table("profiles")
-        .select("school_id")
-        .eq("id", user_id)
-        .single()
-        .execute()
-    )
-    school_id = profile_res.data.get("school_id") if profile_res.data else None
+    if not enrollments:
+        return []  # Student has no assigned lessons yet
 
-    lesson_query = (
+    # Fetch only lessons they are assigned to
+    lesson_ids = list(enrollments.keys())
+    lessons_res = (
         supabase.table("lessons")
         .select("*")
         .eq("is_published", True)
+        .in_("id", lesson_ids)
+        .execute()
     )
-    if school_id:
-        lesson_query = lesson_query.eq("school_id", school_id)
 
-    lessons_res = lesson_query.execute()
     lessons: List[LessonSummary] = []
     for row in lessons_res.data or []:
         teacher_name = _get_teacher_name(row.get("teacher_id", ""))
@@ -112,10 +106,10 @@ def _get_student_lessons(user_id: str) -> List[LessonSummary]:
 
 def get_student_dashboard(user_id: str) -> StudentDashboard:
     lessons = _get_student_lessons(user_id)
-    total = len(lessons)
-    completed = sum(1 for l in lessons if l.is_completed)
+    total       = len(lessons)
+    completed   = sum(1 for l in lessons if l.is_completed)
     in_progress = sum(1 for l in lessons if l.progress_percent > 0 and not l.is_completed)
-    overall = int(sum(l.progress_percent for l in lessons) / total) if total else 0
+    overall     = int(sum(l.progress_percent for l in lessons) / total) if total else 0
 
     stats = DashboardStats(
         total_lessons=total,
@@ -138,7 +132,7 @@ def get_student_dashboard(user_id: str) -> StudentDashboard:
         for s, v in subjects.items()
     ]
 
-    recent = sorted(lessons, key=lambda x: x.progress_percent, reverse=True)[:5]
+    recent    = sorted(lessons, key=lambda x: x.progress_percent, reverse=True)[:5]
     available = [l for l in lessons if not l.is_completed][:10]
 
     return StudentDashboard(
@@ -169,8 +163,7 @@ def get_student_lesson(user_id: str, lesson_id: str) -> LessonSummary:
         raise HTTPException(status_code=404, detail="Lesson not found.")
     row = res.data
 
-    # ✅ FIX: Use .execute() without .single() so missing enrollment
-    # returns empty list instead of throwing a 500 error
+    # ✅ FIX: no .single() — avoids 500 when student hasn't started yet
     enroll_res = (
         supabase.table("student_lessons")
         .select("*")
@@ -189,7 +182,6 @@ def get_student_lesson(user_id: str, lesson_id: str) -> LessonSummary:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_lesson_page(user_id: str, lesson_id: str, page_num: int) -> PageContent:
-    """Return original + simplified content for a page."""
     lesson_res = (
         supabase.table("lessons")
         .select("id, page_count")
@@ -225,7 +217,6 @@ def get_lesson_page(user_id: str, lesson_id: str, page_num: int) -> PageContent:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_lesson_audio(user_id: str, lesson_id: str) -> AudioResponse:
-    """Return pre-generated audio URL for student's preferred language."""
     profile_res = (
         supabase.table("profiles")
         .select("language")
@@ -243,7 +234,6 @@ def get_lesson_audio(user_id: str, lesson_id: str) -> AudioResponse:
         .execute()
     )
     if not audio_res.data:
-        # Fallback to English
         audio_res = (
             supabase.table("lesson_audio")
             .select("audio_url, language")
@@ -280,10 +270,10 @@ def update_lesson_progress(
     progress_percent = min(100, int((current_page / page_count) * 100))
 
     upsert_data = {
-        "student_id": user_id,
-        "lesson_id": lesson_id,
-        "current_page": current_page,
-        "is_completed": is_completed,
+        "student_id":       user_id,
+        "lesson_id":        lesson_id,
+        "current_page":     current_page,
+        "is_completed":     is_completed,
         "progress_percent": 100 if is_completed else progress_percent,
         "last_accessed_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -302,11 +292,11 @@ def update_lesson_progress(
         title = (title_res.data or {}).get("title", "Lesson")
         supabase.table("activity_log").insert(
             {
-                "user_id": user_id,
-                "action": "completed",
-                "lesson_id": lesson_id,
+                "user_id":      user_id,
+                "action":       "completed",
+                "lesson_id":    lesson_id,
                 "lesson_title": title,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at":   datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
 
@@ -314,11 +304,11 @@ def update_lesson_progress(
 
 
 def get_student_progress(user_id: str) -> StudentProgressPage:
-    lessons = _get_student_lessons(user_id)
-    total = len(lessons)
-    completed_list = [l for l in lessons if l.is_completed]
+    lessons         = _get_student_lessons(user_id)
+    total           = len(lessons)
+    completed_list  = [l for l in lessons if l.is_completed]
     inprogress_list = [l for l in lessons if l.progress_percent > 0 and not l.is_completed]
-    completed_count = len(completed_list)
+    completed_count  = len(completed_list)
     in_progress_count = len(inprogress_list)
     overall = int(sum(l.progress_percent for l in lessons) / total) if total else 0
 
