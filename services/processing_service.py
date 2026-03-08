@@ -3,8 +3,8 @@ services/processing_service.py – Async lesson processing pipeline.
 
 Steps executed in order after a PDF is uploaded:
   1. extract_text   – Extract raw text from the PDF (pdfplumber)
-  2. simplify       – Simplify text for dyslexia/cognitive profiles (HF API)
-  3. image_desc     – Generate image alt-text descriptions (HF API)
+  2. simplify       – Simplify text for dyslexia/cognitive profiles (HF Mistral-7B)
+  3. image_desc     – Generate image alt-text descriptions (placeholder)
   4. audio_*        – Synthesise TTS in all 4 languages (Azure Neural TTS)
 
 Each step updates the processing_jobs.steps flags so the teacher can
@@ -26,12 +26,32 @@ from database import supabase
 
 logger = logging.getLogger(__name__)
 
+# ── Azure TTS voices (Nigerian voices, fallback to standard if unavailable) ──
 LANGUAGES = {
-    "english": "en-NG-AbeoVoice",   # Falls back to en-US-JennyNeural if unavailable
+    "english": "en-NG-AbeoVoice",
     "hausa":   "ha-NG-AliVoice",
     "yoruba":  "yo-NG-AdenleVoice",
     "igbo":    "ig-NG-EzinneVoice",
 }
+
+LANGUAGE_FALLBACKS = {
+    "english": "en-US-JennyNeural",
+    "hausa":   "en-US-JennyNeural",   # No Hausa fallback — use English
+    "yoruba":  "en-US-JennyNeural",
+    "igbo":    "en-US-JennyNeural",
+}
+
+HF_API_URL = "https://api-inference.huggingface.co/models/"
+
+# Max chars sent to TTS per language (Azure limit is ~8000 chars for REST API)
+TTS_MAX_CHARS = 6000
+
+# Max chars sent to Mistral for simplification per page
+SIMPLIFY_MAX_CHARS = 1500
+
+# How many times to retry HF if model is loading (cold start)
+HF_MAX_RETRIES = 3
+HF_RETRY_DELAY = 20  # seconds to wait between retries
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -42,37 +62,62 @@ async def enqueue_lesson_processing(lesson_id: str, storage_path: str) -> None:
     """Top-level background coroutine for the full processing pipeline."""
     logger.info("Processing started for lesson %s", lesson_id)
     _set_status(lesson_id, "running")
+
     try:
         # 1. Download file from Supabase Storage
+        logger.info("Downloading lesson file: %s", storage_path)
         file_bytes = _download_lesson_file(storage_path)
 
         # 2. Extract text pages
         pages = _extract_text(file_bytes)
+        logger.info("Extracted %d pages from lesson %s", len(pages), lesson_id)
         _update_step(lesson_id, "extract_text", True)
         _update_page_count(lesson_id, len(pages))
 
-        # 3. For each page: simplify + store
-        for i, text in enumerate(pages, start=1):
-            simplified = await _simplify_text(text)
-            img_desc = await _describe_images(text)  # placeholder
+        # 3. For each page: simplify + store (run simplifications concurrently)
+        logger.info("Simplifying %d pages via Mistral…", len(pages))
+        simplified_pages = await asyncio.gather(
+            *[_simplify_text(text) for text in pages],
+            return_exceptions=True,
+        )
+
+        for i, (text, simplified) in enumerate(zip(pages, simplified_pages), start=1):
+            # If simplification threw an exception, treat as None
+            if isinstance(simplified, Exception):
+                logger.warning("Simplification failed for page %d: %s", i, simplified)
+                simplified = None
+            img_desc = await _describe_images(text)
             _upsert_page(lesson_id, i, text, simplified, img_desc)
+            logger.info("Page %d stored (simplified=%s)", i, "yes" if simplified else "no")
 
         _update_step(lesson_id, "simplify_dyslexia", True)
         _update_step(lesson_id, "image_descriptions", True)
 
-        # 4. Synthesise audio per language (full lesson text combined)
-        full_text = "\n\n".join(pages)
+        # 4. Synthesise audio per language
+        # Use full lesson text (all pages joined) up to TTS_MAX_CHARS
+        full_text = "\n\n".join(p for p in pages if p.strip())
+        logger.info("Starting TTS synthesis for lesson %s (%d chars)", lesson_id, len(full_text))
+
         for lang_key, voice in LANGUAGES.items():
-            audio_url = await _synthesise_tts(full_text[:3000], voice, lesson_id, lang_key)
+            logger.info("Synthesising %s audio…", lang_key)
+            audio_url = await _synthesise_tts(
+                full_text[:TTS_MAX_CHARS], voice, lesson_id, lang_key,
+                fallback_voice=LANGUAGE_FALLBACKS[lang_key]
+            )
             if audio_url:
                 _store_audio(lesson_id, lang_key, audio_url)
-                step_key = f"audio_{lang_key}"
-                _update_step(lesson_id, step_key, True)
+                _update_step(lesson_id, f"audio_{lang_key}", True)
+                logger.info("Audio stored for %s", lang_key)
+            else:
+                logger.warning("Audio skipped for %s", lang_key)
 
         # 5. Mark done
         _set_status(lesson_id, "done")
-        supabase.table("lessons").update({"is_published": True, "processing_status": "done"}).eq("id", lesson_id).execute()
-        logger.info("Processing complete for lesson %s", lesson_id)
+        supabase.table("lessons").update({
+            "is_published": True,
+            "processing_status": "done",
+        }).eq("id", lesson_id).execute()
+        logger.info("✅ Processing complete for lesson %s", lesson_id)
 
     except Exception as exc:
         logger.error("Processing failed for lesson %s: %s", lesson_id, exc, exc_info=True)
@@ -92,7 +137,6 @@ def _set_status(lesson_id: str, status: str, error: str | None = None) -> None:
 
 
 def _update_step(lesson_id: str, step: str, value: bool) -> None:
-    """Update a single step flag in the processing_jobs JSONB column."""
     res = (
         supabase.table("processing_jobs")
         .select("steps")
@@ -124,54 +168,105 @@ def _extract_text(file_bytes: bytes) -> list[str]:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
-            pages.append(text.strip())
-    return pages if pages else ["[No text extracted]"]
+            cleaned = text.strip()
+            # Skip completely blank pages
+            if cleaned:
+                pages.append(cleaned)
+    return pages if pages else ["[No text could be extracted from this document]"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HuggingFace – text simplification
+# HuggingFace – text simplification (Mistral-7B)
 # ─────────────────────────────────────────────────────────────────────────────
-
-HF_API_URL = "https://api-inference.huggingface.co/models/"
-
 
 async def _simplify_text(text: str) -> str | None:
     """
-    Call Mistral-7B via HuggingFace Inference API to simplify text
-    for learners with dyslexia or cognitive disabilities.
+    Call Mistral-7B via HuggingFace Inference API to produce a simplified
+    summary for learners with dyslexia or cognitive disabilities.
+
+    Uses [INST]...[/INST] tags which is Mistral's correct instruction format.
+    Without these tags Mistral echoes the prompt instead of following it.
     """
     if not settings.HF_TOKEN or not text.strip():
         return None
 
     prompt = (
-        "Rewrite the following educational text in simple English suitable for "
-        "a primary school student with dyslexia. Use short sentences, simple words, "
-        "and clear structure.\n\nText:\n"
-        + text[:1500]
-        + "\n\nSimplified version:"
+        "[INST] You are a helpful teacher. A student with learning difficulties "
+        "needs to understand the lesson below. Write a SHORT, CLEAR SUMMARY using:\n"
+        "- Very short sentences (maximum 10 words each)\n"
+        "- Simple everyday words a 10-year-old would understand\n"
+        "- Bullet points (•) for the most important facts\n"
+        "- A section at the end starting with 'What this means:' that explains the main idea in 2 sentences\n\n"
+        "IMPORTANT: Do NOT copy sentences from the original. Write everything in your own simple words.\n\n"
+        "Lesson text:\n"
+        + text[:SIMPLIFY_MAX_CHARS]
+        + "\n\nSimple summary: [/INST]"
     )
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            r = await client.post(
-                HF_API_URL + settings.HF_MODEL,
-                headers={"Authorization": f"Bearer {settings.HF_TOKEN}"},
-                json={"inputs": prompt, "parameters": {"max_new_tokens": 400}},
-            )
-            r.raise_for_status()
-            data = r.json()
-            if isinstance(data, list) and data:
-                generated = data[0].get("generated_text", "")
-                # Strip the prompt echo
-                if "Simplified version:" in generated:
-                    return generated.split("Simplified version:")[-1].strip()
-                return generated.strip()
-    except Exception as exc:
-        logger.warning("HF simplification failed: %s", exc)
+
+    for attempt in range(1, HF_MAX_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                r = await client.post(
+                    HF_API_URL + settings.HF_MODEL,
+                    headers={"Authorization": f"Bearer {settings.HF_TOKEN}"},
+                    json={
+                        "inputs": prompt,
+                        "parameters": {
+                            "max_new_tokens": 500,
+                            "temperature": 0.3,
+                            "repetition_penalty": 1.3,
+                            "do_sample": True,
+                        },
+                    },
+                )
+
+                # 503 = model still loading — wait and retry
+                if r.status_code == 503:
+                    wait = HF_RETRY_DELAY * attempt
+                    logger.warning(
+                        "HF model loading (attempt %d/%d) — waiting %ds…",
+                        attempt, HF_MAX_RETRIES, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+
+                r.raise_for_status()
+                data = r.json()
+
+                if isinstance(data, list) and data:
+                    generated = data[0].get("generated_text", "")
+
+                    # Extract only what comes after the prompt
+                    if "[/INST]" in generated:
+                        result = generated.split("[/INST]")[-1].strip()
+                    elif "Simple summary:" in generated:
+                        result = generated.split("Simple summary:")[-1].strip()
+                    else:
+                        result = generated.strip()
+
+                    # Sanity check — reject if too short or basically empty
+                    if len(result) < 40:
+                        logger.warning("Simplified text too short (%d chars), discarding", len(result))
+                        return None
+
+                    logger.info("Simplified text generated (%d chars)", len(result))
+                    return result
+
+        except httpx.TimeoutException:
+            logger.warning("HF timeout on attempt %d/%d", attempt, HF_MAX_RETRIES)
+            if attempt < HF_MAX_RETRIES:
+                await asyncio.sleep(HF_RETRY_DELAY)
+        except Exception as exc:
+            logger.warning("HF simplification failed (attempt %d): %s", attempt, exc)
+            if attempt < HF_MAX_RETRIES:
+                await asyncio.sleep(HF_RETRY_DELAY)
+
+    logger.error("HF simplification failed after %d attempts", HF_MAX_RETRIES)
     return None
 
 
 async def _describe_images(page_text: str) -> str | None:
-    """Placeholder – in a real implementation send page images to a vision model."""
+    """Placeholder – vision model integration deferred to v2."""
     return None
 
 
@@ -179,49 +274,75 @@ async def _describe_images(page_text: str) -> str | None:
 # Azure TTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _synthesise_tts(text: str, voice: str, lesson_id: str, lang_key: str) -> str | None:
+async def _synthesise_tts(
+    text: str,
+    voice: str,
+    lesson_id: str,
+    lang_key: str,
+    fallback_voice: str | None = None,
+) -> str | None:
     """
     Call Azure Cognitive Services TTS REST API and upload the resulting
-    MP3 to Supabase Storage.  Returns the public URL or None on failure.
+    MP3 to Supabase Storage. Returns the public URL or None on failure.
+    Automatically retries with fallback voice if the primary voice fails.
     """
     if not settings.AZURE_TTS_KEY:
-        logger.warning("AZURE_TTS_KEY not set – skipping TTS for %s", lang_key)
+        logger.warning("AZURE_TTS_KEY not set — skipping TTS for %s", lang_key)
         return None
 
-    region = settings.AZURE_TTS_REGION
+    voices_to_try = [voice]
+    if fallback_voice and fallback_voice != voice:
+        voices_to_try.append(fallback_voice)
+
+    region   = settings.AZURE_TTS_REGION
     endpoint = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
 
-    ssml = (
-        f"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>"
-        f"<voice name='{voice}'>{_escape_xml(text)}</voice></speak>"
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            r = await client.post(
-                endpoint,
-                headers={
-                    "Ocp-Apim-Subscription-Key": settings.AZURE_TTS_KEY,
-                    "Content-Type": "application/ssml+xml",
-                    "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
-                },
-                content=ssml.encode("utf-8"),
-            )
-            r.raise_for_status()
-            audio_bytes = r.content
-
-        storage_path = f"audio/{lesson_id}/{lang_key}.mp3"
-        supabase.storage.from_("lesson-audio").upload(
-            storage_path,
-            audio_bytes,
-            file_options={"content-type": "audio/mpeg"},
+    for v in voices_to_try:
+        ssml = (
+            f"<speak version='1.0' "
+            f"xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>"
+            f"<voice name='{v}'>{_escape_xml(text)}</voice></speak>"
         )
-        public_url_res = supabase.storage.from_("lesson-audio").get_public_url(storage_path)
-        return public_url_res
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                r = await client.post(
+                    endpoint,
+                    headers={
+                        "Ocp-Apim-Subscription-Key": settings.AZURE_TTS_KEY,
+                        "Content-Type": "application/ssml+xml",
+                        "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+                    },
+                    content=ssml.encode("utf-8"),
+                )
 
-    except Exception as exc:
-        logger.error("Azure TTS failed for %s (%s): %s", lesson_id, lang_key, exc)
-        return None
+                if r.status_code == 400 and fallback_voice and v != fallback_voice:
+                    logger.warning("Voice %s not available, retrying with fallback %s", v, fallback_voice)
+                    continue
+
+                r.raise_for_status()
+                audio_bytes = r.content
+
+            storage_path = f"audio/{lesson_id}/{lang_key}.mp3"
+
+            # Remove old file if exists (re-upload scenario)
+            try:
+                supabase.storage.from_("lesson-audio").remove([storage_path])
+            except Exception:
+                pass
+
+            supabase.storage.from_("lesson-audio").upload(
+                storage_path,
+                audio_bytes,
+                file_options={"content-type": "audio/mpeg"},
+            )
+            public_url = supabase.storage.from_("lesson-audio").get_public_url(storage_path)
+            logger.info("TTS audio uploaded for %s using voice %s", lang_key, v)
+            return public_url
+
+        except Exception as exc:
+            logger.error("Azure TTS failed for %s (%s) with voice %s: %s", lesson_id, lang_key, v, exc)
+
+    return None
 
 
 def _escape_xml(text: str) -> str:
@@ -247,9 +368,9 @@ def _upsert_page(
 ) -> None:
     supabase.table("lesson_pages").upsert(
         {
-            "lesson_id": lesson_id,
-            "page_number": page_number,
-            "content_original": original,
+            "lesson_id":         lesson_id,
+            "page_number":       page_number,
+            "content_original":  original,
             "content_simplified": simplified,
             "image_description": img_description,
         },
@@ -259,6 +380,10 @@ def _upsert_page(
 
 def _store_audio(lesson_id: str, language: str, audio_url: str) -> None:
     supabase.table("lesson_audio").upsert(
-        {"lesson_id": lesson_id, "language": language, "audio_url": audio_url},
+        {
+            "lesson_id": lesson_id,
+            "language":  language,
+            "audio_url": audio_url,
+        },
         on_conflict="lesson_id,language",
     ).execute()
