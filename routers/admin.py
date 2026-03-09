@@ -44,3 +44,7 @@ def create_school(
 def regenerate_access_code(school_id: str, user_id: str = Depends(get_current_user)):
     """Generate a fresh access code for a school (invalidates the old one)."""
     return admin_service.regenerate_access_code(user_id, school_id)
+
+@router.get("/users")
+def users(user_id: str = Depends(get_current_user)):
+    return admin_service.get_all_users(user_id)
