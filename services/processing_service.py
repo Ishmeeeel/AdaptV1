@@ -163,17 +163,18 @@ def _download_lesson_file(storage_path: str) -> bytes:
 
 
 def _extract_text(file_bytes: bytes) -> list[str]:
-    """Extract per-page text from a PDF using pdfplumber."""
+    """Extract per-page text from a PDF using pdfplumber. Max 30 pages."""
     pages: list[str] = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
+        total = len(pdf.pages)
+        limit = min(total, 30)
+        logger.info("PDF has %d pages — processing first %d", total, limit)
+        for page in pdf.pages[:limit]:
             text = page.extract_text() or ""
             cleaned = text.strip()
-            # Skip completely blank pages
             if cleaned:
                 pages.append(cleaned)
     return pages if pages else ["[No text could be extracted from this document]"]
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HuggingFace – text simplification (Mistral-7B)
