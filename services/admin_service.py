@@ -142,3 +142,24 @@ def regenerate_access_code(user_id: str, school_id: str) -> Dict[str, str]:
     new_code = _generate_access_code()
     supabase.table("schools").update({"access_code": new_code}).eq("id", school_id).execute()
     return {"access_code": new_code}
+
+def get_all_users(user_id: str) -> List[Dict[str, Any]]:
+    _verify_admin(user_id)
+    res = (
+        supabase.table("profiles")
+        .select("id, full_name, email, role, school_id, disability_profile, language")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return [
+        {
+            "id":                 r["id"],
+            "name":               r.get("full_name", ""),
+            "email":              r.get("email", ""),
+            "role":               r.get("role", ""),
+            "school_id":          r.get("school_id"),
+            "disability_profile": r.get("disability_profile"),
+            "language":           r.get("language"),
+        }
+        for r in (res.data or [])
+    ]

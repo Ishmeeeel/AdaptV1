@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # ── Hugging Face ──────────────────────────────────────────────────────
     HF_TOKEN: str = ""
-    HF_MODEL: str = "mistralai/Mistral-7B-Instruct-v0.3"
+    HF_MODEL: str = "mistralai/Mistral-7B-Instruct-v0.2"
 
     # ── CORS ──────────────────────────────────────────────────────────────
     # Comma-separated list of allowed origins, e.g.
