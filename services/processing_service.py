@@ -181,28 +181,52 @@ def _extract_text(file_bytes: bytes) -> list[str]:
 
 async def _simplify_text(text: str) -> str | None:
     """
-    Call Mistral-7B via HuggingFace Inference API to produce a simplified
-    summary for learners with dyslexia or cognitive disabilities.
-
-    Uses [INST]...[/INST] tags which is Mistral's correct instruction format.
-    Without these tags Mistral echoes the prompt instead of following it.
+    Call Groq API (Llama3-8B) to simplify lesson text.
+    Fast, free, no cold starts — replaces HuggingFace Mistral.
     """
-    if not settings.HF_TOKEN or not text.strip():
+    if not settings.GROQ_API_KEY or not text.strip():
+        logger.warning("Groq API key not set or empty text — skipping simplification")
         return None
 
     prompt = (
-        "[INST] You are a helpful teacher. A student with learning difficulties "
+        "You are a helpful teacher. A student with learning difficulties "
         "needs to understand the lesson below. Write a SHORT, CLEAR SUMMARY using:\n"
         "- Very short sentences (maximum 10 words each)\n"
         "- Simple everyday words a 10-year-old would understand\n"
         "- Bullet points (•) for the most important facts\n"
-        "- A section at the end starting with 'What this means:' that explains the main idea in 2 sentences\n\n"
-        "IMPORTANT: Do NOT copy sentences from the original. Write everything in your own simple words.\n\n"
+        "- End with 'What this means:' explaining the main idea in 2 sentences\n\n"
+        "IMPORTANT: Do NOT copy sentences from the original. "
+        "Write everything in your own simple words.\n\n"
         "Lesson text:\n"
         + text[:SIMPLIFY_MAX_CHARS]
-        + "\n\nSimple summary: [/INST]"
     )
 
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "llama3-8b-8192",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 500,
+                    "temperature": 0.3,
+                },
+            )
+            r.raise_for_status()
+            result = r.json()["choices"][0]["message"]["content"].strip()
+            if len(result) < 40:
+                logger.warning("Simplified text too short (%d chars), discarding", len(result))
+                return None
+            logger.info("✅ Groq simplified text generated (%d chars)", len(result))
+            return result
+    except Exception as exc:
+        logger.warning("Groq simplification failed: %s", exc)
+        return None
+    
     for attempt in range(1, HF_MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(timeout=90.0) as client:
