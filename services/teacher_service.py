@@ -568,3 +568,107 @@ def save_lesson_grade(
     }).eq("student_id", student_id).eq("lesson_id", lesson_id).execute()
 
     return {"ok": True}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paste this at the bottom of services/teacher_service.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def reprocess_lesson(user_id: str, lesson_id: str, background_tasks):
+    from database import supabase
+    from fastapi import HTTPException
+    from services.processing_service import ProcessingService
+
+    # Verify lesson exists and teacher owns it
+    lesson_res = supabase.table("lessons").select("*").eq("id", lesson_id).single().execute()
+    if not lesson_res.data:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+
+    lesson = lesson_res.data
+
+    if lesson["teacher_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not authorised")
+
+    # Fetch all pages
+    pages_res = (
+        supabase.table("lesson_pages")
+        .select("*")
+        .eq("lesson_id", lesson_id)
+        .order("page_number")
+        .execute()
+    )
+    pages = pages_res.data or []
+
+    if not pages:
+        raise HTTPException(status_code=404, detail="No pages found for this lesson")
+
+    # Mark as processing
+    supabase.table("lessons").update({"status": "processing"}).eq("id", lesson_id).execute()
+
+    # Queue background task
+    background_tasks.add_task(
+        _run_reprocess,
+        lesson_id=lesson_id,
+        pages=pages,
+        language=lesson.get("language", "english"),
+    )
+
+    return {
+        "message": f"Reprocessing started for '{lesson['title']}'",
+        "lesson_id": lesson_id,
+        "pages": len(pages),
+    }
+
+
+async def _run_reprocess(lesson_id: str, pages: list, language: str):
+    from database import supabase
+    from services.processing_service import ProcessingService
+
+    processing = ProcessingService()
+    completed  = 0
+    failed     = 0
+
+    for page in pages:
+        try:
+            page_num         = page["page_number"]
+            original_content = page.get("content_original", "")
+
+            if not original_content:
+                print(f"⚠️  Page {page_num} — no original content, skipping")
+                continue
+
+            print(f"🔄 Reprocessing page {page_num} of lesson {lesson_id}…")
+
+            simplified = await processing._simplify_text(original_content)
+
+            audio_url = None
+            try:
+                audio_url = await processing._generate_audio(
+                    simplified or original_content,
+                    language=language,
+                    page_number=page_num,
+                    lesson_id=lesson_id,
+                )
+            except Exception as audio_err:
+                print(f"⚠️  Audio failed page {page_num}: {audio_err}")
+
+            update_data: dict = {}
+            if simplified:
+                update_data["content_simplified"] = simplified
+            if audio_url:
+                update_data["audio_url"] = audio_url
+
+            if update_data:
+                supabase.table("lesson_pages").update(update_data).eq("id", page["id"]).execute()
+                print(f"✅ Page {page_num} done")
+                completed += 1
+            else:
+                print(f"❌ Page {page_num} — nothing updated")
+                failed += 1
+
+        except Exception as e:
+            print(f"❌ Page {page['page_number']} error: {e}")
+            failed += 1
+
+    final_status = "ready" if failed == 0 else "ready_partial"
+    supabase.table("lessons").update({"status": final_status}).eq("id", lesson_id).execute()
+    print(f"🏁 Done — {completed} ok, {failed} failed — status: {final_status}")
