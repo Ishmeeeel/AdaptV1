@@ -78,7 +78,20 @@ def assign_lesson(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Processing
+# Reprocess — re-runs Groq + Audio on all pages of a lesson
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/lessons/{lesson_id}/reprocess")
+async def reprocess_lesson(
+    lesson_id: str,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(get_current_user),
+):
+    return await teacher_service.reprocess_lesson(user_id, lesson_id, background_tasks)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Processing status
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/processing/{lesson_id}", response_model=ProcessingStatus)
@@ -114,7 +127,6 @@ def save_note(
     return teacher_service.save_teacher_note(user_id, student_id, body.note_text)
 
 
-# ✅ NEW — Grade a specific lesson for a student
 @router.put("/students/{student_id}/lessons/{lesson_id}/grade")
 def grade_lesson(
     student_id: str,

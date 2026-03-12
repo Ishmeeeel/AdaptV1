@@ -52,5 +52,5 @@ def users(user_id: str = Depends(get_current_user)):
 @router.get("/lessons")
 def all_lessons(user_id: str = Depends(get_current_user)):
     from database import supabase
-    res = supabase.table("lessons").select("*, profiles(name)").order("created_at", desc=True).execute()
+    res = supabase.table("lessons").select("*, profiles(full_name)").order("created_at", desc=True).execute()
     return res.data or []
