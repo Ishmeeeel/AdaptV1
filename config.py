@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     HF_TOKEN: str = ""
     HF_MODEL: str = "mistralai/Mistral-7B-Instruct-v0.2"
 
+    # ── Groq ──────────────────────────────────────────────────────────────
+    GROQ_API_KEY: str = ""
+
+
     # ── CORS ──────────────────────────────────────────────────────────────
     # Comma-separated list of allowed origins, e.g.
     # "https://adaptable.vercel.app,http://localhost:3000"
