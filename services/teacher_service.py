@@ -579,9 +579,14 @@ async def reprocess_lesson(user_id: str, lesson_id: str, background_tasks):
         raise HTTPException(status_code=404, detail="Lesson not found")
 
     lesson = lesson_res.data
-    if lesson["teacher_id"] != user_id:
-        raise HTTPException(status_code=403, detail="Not authorised")
+     
+     # ── Admin or the lesson's own teacher can reprocess ──
+    profile_res = supabase.table("profiles").select("role").eq("id", user_id).single().execute()
+    user_role = (profile_res.data or {}).get("role", "")
 
+    if user_role != "admin" and lesson["teacher_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not authorised")
+    
     pages_res = (
         supabase.table("lesson_pages")
         .select("*")
