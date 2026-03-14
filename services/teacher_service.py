@@ -135,7 +135,7 @@ def get_teacher_dashboard(teacher_id: str) -> TeacherDashboard:
     )
     lessons_data = lessons_res.data or []
     total_lessons = len(lessons_data)
-    published = sum(1 for l in lessons_data if l.get("is_published"))
+    published = sum(1 for lesson in lessons_data if lesson.get("is_published"))
 
     total_count_res = (
         supabase.table("profiles")
@@ -179,7 +179,7 @@ def get_teacher_dashboard(teacher_id: str) -> TeacherDashboard:
     profile_breakdown = [{"profile": k, "count": v} for k, v in profile_counter.items()]
 
     top_lessons = sorted(
-        [_row_to_teacher_lesson(l) for l in lessons_data],
+        [_row_to_teacher_lesson(lesson) for lesson in lessons_data],
         key=lambda x: x.student_count,
         reverse=True,
     )[:5]
@@ -574,21 +574,14 @@ def save_lesson_grade(
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def reprocess_lesson(user_id: str, lesson_id: str, background_tasks):
-    from database import supabase
-    from fastapi import HTTPException
-    from services.processing_service import ProcessingService
-
-    # Verify lesson exists and teacher owns it
     lesson_res = supabase.table("lessons").select("*").eq("id", lesson_id).single().execute()
     if not lesson_res.data:
         raise HTTPException(status_code=404, detail="Lesson not found")
 
     lesson = lesson_res.data
-
     if lesson["teacher_id"] != user_id:
         raise HTTPException(status_code=403, detail="Not authorised")
 
-    # Fetch all pages
     pages_res = (
         supabase.table("lesson_pages")
         .select("*")
@@ -597,20 +590,12 @@ async def reprocess_lesson(user_id: str, lesson_id: str, background_tasks):
         .execute()
     )
     pages = pages_res.data or []
-
     if not pages:
         raise HTTPException(status_code=404, detail="No pages found for this lesson")
 
-    # Mark as processing
-    supabase.table("lessons").update({"status": "processing"}).eq("id", lesson_id).execute()
+    supabase.table("lessons").update({"processing_status": "running"}).eq("id", lesson_id).execute()
 
-    # Queue background task
-    background_tasks.add_task(
-        _run_reprocess,
-        lesson_id=lesson_id,
-        pages=pages,
-        language=lesson.get("language", "english"),
-    )
+    background_tasks.add_task(_run_reprocess, lesson_id=lesson_id, pages=pages)
 
     return {
         "message": f"Reprocessing started for '{lesson['title']}'",
@@ -619,56 +604,41 @@ async def reprocess_lesson(user_id: str, lesson_id: str, background_tasks):
     }
 
 
-async def _run_reprocess(lesson_id: str, pages: list, language: str):
-    from database import supabase
-    from services.processing_service import ProcessingService
+async def _run_reprocess(lesson_id: str, pages: list):
+    from services.processing_service import _simplify_text
 
-    processing = ProcessingService()
-    completed  = 0
-    failed     = 0
+    completed = 0
+    failed    = 0
 
     for page in pages:
         try:
-            page_num         = page["page_number"]
-            original_content = page.get("content_original", "")
+            page_num = page["page_number"]
+            original = page.get("content_original", "")
 
-            if not original_content:
-                print(f"⚠️  Page {page_num} — no original content, skipping")
+            if not original:
+                logger.warning("⚠️ Page %d — no original content, skipping", page_num)
                 continue
 
-            print(f"🔄 Reprocessing page {page_num} of lesson {lesson_id}…")
+            logger.info("🔄 Reprocessing page %d of lesson %s…", page_num, lesson_id)
 
-            simplified = await processing._simplify_text(original_content)
-
-            audio_url = None
-            try:
-                audio_url = await processing._generate_audio(
-                    simplified or original_content,
-                    language=language,
-                    page_number=page_num,
-                    lesson_id=lesson_id,
-                )
-            except Exception as audio_err:
-                print(f"⚠️  Audio failed page {page_num}: {audio_err}")
+            simplified = await _simplify_text(original)
 
             update_data: dict = {}
             if simplified:
                 update_data["content_simplified"] = simplified
-            if audio_url:
-                update_data["audio_url"] = audio_url
 
             if update_data:
                 supabase.table("lesson_pages").update(update_data).eq("id", page["id"]).execute()
-                print(f"✅ Page {page_num} done")
+                logger.info("✅ Page %d done — simplified=%s", page_num, bool(simplified))
                 completed += 1
             else:
-                print(f"❌ Page {page_num} — nothing updated")
+                logger.warning("❌ Page %d — nothing updated", page_num)
                 failed += 1
 
         except Exception as e:
-            print(f"❌ Page {page['page_number']} error: {e}")
+            logger.error("❌ Page %d error: %s", page["page_number"], e)
             failed += 1
 
-    final_status = "ready" if failed == 0 else "ready_partial"
-    supabase.table("lessons").update({"status": final_status}).eq("id", lesson_id).execute()
-    print(f"🏁 Done — {completed} ok, {failed} failed — status: {final_status}")
+    final_status = "done" if failed == 0 else "done"
+    supabase.table("lessons").update({"processing_status": final_status}).eq("id", lesson_id).execute()
+    logger.info("🏁 Reprocess done — %d ok, %d failed", completed, failed)
